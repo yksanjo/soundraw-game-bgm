@@ -18,6 +18,8 @@
     "start": "node dist/index.js",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:apis": "tsx scripts/test-apis.ts",
+    "test:apis:full": "tsx scripts/test-apis.ts --full",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"

@@ -1,6 +1,6 @@
 # Soundraw Game BGM MCP Server
 
-An MCP (Model Context Protocol) server that enables AI agents to generate game background music. Uses **DeepSeek** for intelligent scene analysis and parameter generation, and **Soundraw** for actual music generation.
+An MCP (Model Context Protocol) server that enables AI agents to generate game background music. Uses **DeepSeek** for intelligent scene analysis and parameter generation, and **Soundraw B2B API V3** for actual music generation.
 
 ## Architecture
 
@@ -10,22 +10,24 @@ Game Dev Agent (Claude/Cursor)
 MCP Server (soundraw-game-bgm)
     ↓ uses DeepSeek API for reasoning
 DeepSeek analyzes game context
-    ↓ generates music parameters
+    ↓ generates Soundraw parameters (moods, genres, themes, tempo, energy)
 Soundraw API generates actual music
-    ↓ returns audio files + metadata
-Game Dev Agent receives music
+    ↓ async: returns request_id → poll for result
+Game Dev Agent receives share_link + audio_url
 ```
 
 ## Features
 
 - **Cost-Optimized**: Uses DeepSeek (~90% cheaper than Claude) for scene analysis
 - **4 MCP Tools**: Full suite for game audio needs
+- **Real Soundraw API**: Uses B2B API V3 with proper async handling
 - **Engine Integration**: Auto-generated code snippets for Unreal, Unity, and Godot
-- **Adaptive Audio**: Stem separation for dynamic game audio
+- **Adaptive Audio**: Stem muting for dynamic game audio layers
 
 ## Installation
 
 ```bash
+git clone https://github.com/yksanjo/soundraw-game-bgm.git
 cd soundraw-game-bgm
 npm install
 npm run build
@@ -33,12 +35,56 @@ npm run build
 
 ## Configuration
 
-Create a `.env` file based on `.env.example`:
+Create a `.env` file:
 
 ```env
 DEEPSEEK_API_KEY=sk-your-deepseek-api-key
-SOUNDRAW_API_KEY=your-soundraw-api-key
-SOUNDRAW_API_BASE_URL=https://api.soundraw.io/v1
+SOUNDRAW_API_KEY=your-soundraw-bearer-token
+```
+
+## Testing API Connections
+
+Before using the MCP server, verify your API keys work:
+
+```bash
+# Quick test (checks API connections only)
+npm run test:apis
+
+# Full test (generates a 10-second track - uses API credits)
+npm run test:apis:full
+```
+
+Expected output:
+```
+🎮 Soundraw Game BGM MCP Server - API Test
+
+==================================================
+Testing DeepSeek API
+==================================================
+API Key: sk-xxxxxx...
+✅ DeepSeek Response: "DeepSeek OK"
+
+==================================================
+Testing Soundraw API Connection
+==================================================
+API Key: xxxxxxxxxx...
+✅ Soundraw Account: Number of queries: X from ...
+
+==================================================
+Testing Soundraw Tags Endpoint
+==================================================
+✅ Available genres for "Epic" mood: Orchestra, Electronica...
+✅ Available themes: Gaming, Cinematic...
+
+==================================================
+Test Summary
+==================================================
+✅ DeepSeek API
+✅ Soundraw Connection
+✅ Soundraw Tags
+❌ Music Generation (skipped without --full flag)
+
+🎉 Core APIs working! Ready to use the MCP server.
 ```
 
 ## MCP Tools
@@ -54,53 +100,66 @@ Generate background music based on game scene description.
   "game_genre": "dark_souls_like",
   "intensity": "high",
   "mood": "epic",
-  "duration_seconds": 120,
-  "engine": "unreal"
+  "duration_seconds": 60,
+  "engine": "unreal",
+  "file_format": "m4a"
 }
 ```
 
 **Output:**
-- Audio URL and ID
-- BPM, key, instruments
-- Mood tags
-- Engine-specific integration code
-- DeepSeek's reasoning for parameter choices
+```json
+{
+  "share_link": "https://soundraw.io/edit_music?m=...",
+  "audio_url": "https://..../final_xxx.m4a",
+  "request_id": "...",
+  "duration_seconds": 60,
+  "bpm": 140,
+  "timestamps": [{"start": 0, "end": 15, "energy": "Low"}, ...],
+  "file_format": "m4a",
+  "integration_code": "// Unreal Engine 5 integration...",
+  "deepseek_reasoning": "Boss fights need epic orchestral...",
+  "soundraw_params": {"moods": ["Epic", "Dark"], "genres": ["Orchestra"], ...}
+}
+```
 
 ### 2. `get_bgm_variations`
 
-Generate variations of existing BGM for adaptive audio.
+Generate variations of existing BGM.
 
 **Input:**
 ```json
 {
-  "base_audio_id": "abc123",
-  "variation_type": "intensity",
-  "count": 3
+  "share_link": "https://soundraw.io/edit_music?m=...",
+  "variation_type": "similar",
+  "length": 60
 }
 ```
 
-**Variation Types:**
-- `intensity`: Louder/quieter versions
-- `instrument`: Different instrument arrangements
-- `tempo`: Faster/slower versions
+Or customize energy/stems:
+```json
+{
+  "share_link": "https://soundraw.io/edit_music?m=...",
+  "variation_type": "customize",
+  "energy_preset": "building",
+  "mute_stems": ["me"]
+}
+```
+
+**Stem codes:** `bc` (backing), `bs` (bass), `dr` (drums), `me` (melody), `fe` (fill end), `ff` (fill start)
 
 ### 3. `adaptive_layer_control`
 
-Get stem separation for real-time audio mixing.
+Generate multiple versions with different stems muted for adaptive audio.
 
 **Input:**
 ```json
 {
-  "audio_id": "abc123",
-  "layers": ["drums", "bass", "melody", "ambient"],
-  "crossfade_ms": 500
+  "share_link": "https://soundraw.io/edit_music?m=...",
+  "layers_to_keep": ["drums", "bass", "melody", "backing"]
 }
 ```
 
-**Output:**
-- Individual layer audio URLs
-- Default volume levels
-- JavaScript integration code for adaptive mixing
+**Output:** Separate audio URLs for each layer + JavaScript integration code for runtime mixing.
 
 ### 4. `scene_transition_music`
 
@@ -112,18 +171,18 @@ Generate transition music between scenes.
   "from_scene": "peaceful village exploration",
   "to_scene": "intense boss battle",
   "transition_type": "stinger",
-  "duration_seconds": 5
+  "duration_seconds": 15
 }
 ```
 
 **Transition Types:**
-- `fade`: Gradual transition
+- `fade`: Gradual energy shift
 - `stinger`: Dramatic accent
-- `crossfade`: Blend both scenes
+- `crossfade`: Smooth blend
 
 ## Usage with Claude Code
 
-Add to your `.mcp.json`:
+Add to `~/.mcp.json`:
 
 ```json
 {
@@ -133,39 +192,36 @@ Add to your `.mcp.json`:
       "args": ["/path/to/soundraw-game-bgm/dist/index.js"],
       "env": {
         "DEEPSEEK_API_KEY": "sk-your-key",
-        "SOUNDRAW_API_KEY": "your-soundraw-key"
+        "SOUNDRAW_API_KEY": "your-bearer-token"
       }
     }
   }
 }
 ```
 
-## Example Workflow
-
+Then restart Claude Code and try:
 ```
-You: "Generate epic boss battle music for my Dark Souls-like game"
-
-Agent calls: generate_bgm({
-  scene: "boss_fight",
-  game_genre: "dark_souls_like",
-  intensity: "high",
-  mood: "epic",
-  engine: "unreal"
-})
-
-Returns:
-- Audio URL for the generated track
-- BPM: 140, Key: D minor
-- Instruments: ["orchestra", "choir", "percussion", "strings"]
-- Unreal Engine integration code
-- DeepSeek reasoning: "Boss fights in Souls-like games need driving orchestral
-  arrangements with building intensity. D minor provides the dark, epic quality..."
+Generate epic boss battle music for my Dark Souls-like game, 60 seconds, with Unreal Engine integration code
 ```
+
+## Soundraw API Parameters
+
+The server maps game scenes to these Soundraw parameters:
+
+**Moods:** Angry, Busy & Frantic, Dark, Dreamy, Elegant, Epic, Euphoric, Fear, Funny & Weird, Glamorous, Happy, Heavy & Ponderous, Hopeful, Laid Back, Mysterious, Peaceful, Restless, Romantic, Running, Sad, Scary, Sentimental, Sexy, Smooth, Suspense
+
+**Genres:** Acoustic, Hip Hop, Beats, Funk, Pop, Drum n Bass, Trap, Tokyo night pop, Rock, Latin, House, Tropical House, Ambient, Orchestra, Electro & Dance, Electronica, Techno & Trance, Jersey Club, Drill, R&B, Lofi Hip Hop, World, Afrobeats, Christmas
+
+**Themes:** Ads & Trailers, Broadcasting, Cinematic, Corporate, Comedy, Cooking, Documentary, Drama, Fashion & Beauty, Gaming, Holiday Season, Horror & Thriller, Motivational & Inspiring, Nature, Photography, Sports & Action, Technology, Travel, Tutorials, Vlogs, Wedding & Romance, Workout & Wellness
+
+**Tempo:** low (<100 bpm), normal (100-125 bpm), high (>125 bpm)
+
+**Energy Levels:** Muted, Low, Medium, High, Very High
 
 ## Development
 
 ```bash
-# Run in development mode
+# Run in development mode (watches for changes)
 npm run dev
 
 # Type check
@@ -176,16 +232,19 @@ npm run build
 
 # Run built version
 npm start
+
+# Test API connections
+npm run test:apis
 ```
 
-## Cost Optimization
+## Cost
 
 | Component | Purpose | Cost |
 |-----------|---------|------|
-| DeepSeek | Scene analysis, parameter generation | ~$0.001/request |
-| Soundraw | Actual music generation | Per Soundraw pricing |
+| DeepSeek | Scene analysis → Soundraw params | ~$0.001/request |
+| Soundraw | Music generation | Per your B2B plan |
 
-DeepSeek handles all the reasoning work at a fraction of Claude's cost, while Soundraw generates the actual audio.
+DeepSeek handles the reasoning at ~90% less cost than Claude API.
 
 ## License
 
