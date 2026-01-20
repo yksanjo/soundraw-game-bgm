@@ -2,6 +2,13 @@
 
 An MCP (Model Context Protocol) server that enables AI agents to generate game background music. Uses **DeepSeek** for intelligent scene analysis and parameter generation, and **Soundraw B2B API V3** for actual music generation.
 
+### 🎶 Why Game Developers ❤️ This
+
+Modern games use dynamic, adaptive music — but composing custom BGM is costly and time-consuming.  
+**soundraw-game-bgm automates composition** by analyzing your game scenes and generating royalty-free background music that *fits the mood and gameplay context*.  
+
+It even outputs ready-to-use integration code for **Unity** and **Unreal Engine** so you can drop the track in with no extra engineering work.
+
 ## Architecture
 
 ```
