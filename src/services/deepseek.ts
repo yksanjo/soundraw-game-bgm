@@ -1,5 +1,10 @@
 import OpenAI from 'openai';
 import { logger } from '../utils/logger.js';
+import {
+  SOUNDRAW_MOODS,
+  SOUNDRAW_GENRES,
+  SOUNDRAW_THEMES,
+} from '../types/index.js';
 import type { DeepSeekMusicParams, DeepSeekTransitionParams } from '../types/index.js';
 
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
@@ -21,38 +26,69 @@ function getClient(): OpenAI {
   return client;
 }
 
-const SCENE_ANALYSIS_SYSTEM_PROMPT = `You are a game music composer assistant specialized in translating game scene descriptions into music generation parameters.
+const SCENE_ANALYSIS_SYSTEM_PROMPT = `You are a game music composer assistant. Your job is to translate game scene descriptions into Soundraw API parameters.
 
-Your task is to analyze game scene contexts and output structured JSON parameters for music generation.
+Available Soundraw parameters:
 
-Always output valid JSON with these exact fields:
-- tempo: number (60-180 BPM, appropriate for the scene)
-- mood: string (one primary mood: epic, dark, peaceful, mysterious, energetic, melancholic, tense, triumphant, ethereal, aggressive)
-- instruments: string[] (2-6 instruments appropriate for the genre and mood)
-- energy: "low" | "medium" | "high"
-- key_suggestion: string (e.g., "D minor", "C major", "E phrygian")
-- genre_tags: string[] (2-4 genre tags)
-- reasoning: string (brief explanation of your choices, 1-2 sentences)
+MOODS (pick 1-3):
+${SOUNDRAW_MOODS.join(', ')}
 
-Consider these guidelines:
-- Combat/boss scenes: Higher tempo (120-160), aggressive instruments, minor keys, high energy
-- Exploration: Medium tempo (80-110), atmospheric textures, varied keys, low-medium energy
-- Menu/title: Memorable melodies, medium tempo, often major keys, medium energy
-- Horror: Slow-medium tempo, dissonant elements, minor/diminished keys, varied energy
-- Puzzle: Light, playful, medium tempo, often major keys, low-medium energy
-- Cutscenes: Match the emotional content, cinematic orchestration`;
+GENRES (pick 1-3):
+${SOUNDRAW_GENRES.join(', ')}
 
-const TRANSITION_ANALYSIS_SYSTEM_PROMPT = `You are a game music composer assistant specialized in creating musical transitions between game scenes.
+THEMES (pick 1-2):
+${SOUNDRAW_THEMES.join(', ')}
 
-Analyze the transition from one scene to another and output structured JSON parameters for transition music.
+TEMPO: low (<100 bpm), normal (100-125 bpm), high (>125 bpm)
 
-Always output valid JSON with these exact fields:
-- from_mood: string (mood of the starting scene)
-- to_mood: string (mood of the target scene)
-- transition_style: string (how to musically bridge: "gradual_fade", "dramatic_shift", "tempo_morph", "key_modulation", "stinger_break")
-- tempo_change: "increase" | "decrease" | "stable"
-- key_relationship: string (e.g., "parallel minor", "relative major", "chromatic mediant", "same key")
-- reasoning: string (brief explanation of transition approach)`;
+ENERGY_PROFILE: building (starts low, builds up), steady (consistent energy), climax (high throughout), ambient (low/muted)
+
+Output ONLY valid JSON with these exact fields:
+{
+  "moods": ["mood1", "mood2"],
+  "genres": ["genre1", "genre2"],
+  "themes": ["theme1"],
+  "tempo": "low" | "normal" | "high",
+  "energy_profile": "building" | "steady" | "climax" | "ambient",
+  "reasoning": "Brief explanation of choices"
+}
+
+Scene-to-music guidelines:
+- Boss fights: Epic, Dark, Suspense moods + Orchestra, Rock genres + Gaming theme + high tempo + climax energy
+- Exploration: Mysterious, Peaceful, Dreamy moods + Ambient, Acoustic genres + Nature, Travel themes + low/normal tempo + ambient/steady
+- Combat: Angry, Busy & Frantic, Suspense moods + Rock, Electronica genres + Gaming, Sports & Action themes + high tempo + building/climax
+- Menu/Title: Elegant, Hopeful, Smooth moods + Orchestra, Ambient genres + Cinematic theme + normal tempo + steady
+- Horror: Fear, Scary, Suspense moods + Ambient, Electronica genres + Horror & Thriller theme + low tempo + building
+- Puzzle: Laid Back, Dreamy, Peaceful moods + Lofi Hip Hop, Ambient genres + Technology theme + normal tempo + steady
+- Cutscene: Match emotional content - Sad, Romantic, Epic depending on scene + Orchestra, Acoustic + Cinematic, Drama themes`;
+
+const TRANSITION_ANALYSIS_SYSTEM_PROMPT = `You are a game music composer creating transition music between scenes.
+
+Available Soundraw parameters:
+MOODS: ${SOUNDRAW_MOODS.join(', ')}
+GENRES: ${SOUNDRAW_GENRES.join(', ')}
+THEMES: ${SOUNDRAW_THEMES.join(', ')}
+ENERGY_LEVELS: Muted, Low, Medium, High, Very High
+
+Create a smooth musical transition. Output ONLY valid JSON:
+{
+  "from_mood": "starting mood",
+  "to_mood": "ending mood",
+  "moods": ["mood1", "mood2"],
+  "genres": ["genre1"],
+  "themes": ["theme1"],
+  "tempo": "low" | "normal" | "high",
+  "energy_levels": [
+    {"start": 0, "end": X, "energy": "Level"},
+    {"start": X, "end": Y, "energy": "Level"}
+  ],
+  "reasoning": "Brief explanation"
+}
+
+Transition guidelines:
+- fade: Gradual energy decrease then increase - use 3-4 energy segments
+- stinger: Quick dramatic accent - start Very High, drop to Low, then rise
+- crossfade: Smooth blend - keep energy relatively steady with subtle changes`;
 
 export async function analyzeSceneForMusic(
   scene: string,
@@ -62,14 +98,14 @@ export async function analyzeSceneForMusic(
 ): Promise<DeepSeekMusicParams> {
   logger.info('Analyzing scene for music parameters', { scene, gameGenre, intensity, mood });
 
-  const userPrompt = `Analyze this game scene and generate music parameters:
+  const userPrompt = `Generate Soundraw parameters for this game scene:
 
 Scene Type: ${scene}
 Game Genre: ${gameGenre}
-Intensity Level: ${intensity}
-${mood ? `Desired Mood: ${mood}` : ''}
+Intensity: ${intensity}
+${mood ? `Desired Mood Hint: ${mood}` : ''}
 
-Output only valid JSON, no markdown code blocks.`;
+Output only valid JSON, no markdown.`;
 
   const client = getClient();
 
@@ -90,7 +126,6 @@ Output only valid JSON, no markdown code blocks.`;
 
   logger.debug('DeepSeek raw response', { content });
 
-  // Parse JSON from response, handling potential markdown code blocks
   let jsonStr = content.trim();
   if (jsonStr.startsWith('```')) {
     jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
@@ -98,10 +133,27 @@ Output only valid JSON, no markdown code blocks.`;
 
   try {
     const params = JSON.parse(jsonStr) as DeepSeekMusicParams;
-    logger.info('Scene analysis complete', { tempo: params.tempo, mood: params.mood });
+
+    // Validate moods are from allowed list
+    params.moods = params.moods.filter(m =>
+      SOUNDRAW_MOODS.includes(m as typeof SOUNDRAW_MOODS[number])
+    );
+    params.genres = params.genres.filter(g =>
+      SOUNDRAW_GENRES.includes(g as typeof SOUNDRAW_GENRES[number])
+    );
+    params.themes = params.themes.filter(t =>
+      SOUNDRAW_THEMES.includes(t as typeof SOUNDRAW_THEMES[number])
+    );
+
+    // Ensure at least one of each if filtering removed all
+    if (params.moods.length === 0) params.moods = ['Epic'];
+    if (params.genres.length === 0) params.genres = ['Orchestra'];
+    if (params.themes.length === 0) params.themes = ['Gaming'];
+
+    logger.info('Scene analysis complete', { moods: params.moods, tempo: params.tempo });
     return params;
   } catch (error) {
-    logger.error('Failed to parse DeepSeek response as JSON', { content, error });
+    logger.error('Failed to parse DeepSeek response', { content, error });
     throw new Error(`Failed to parse music parameters: ${content}`);
   }
 }
@@ -114,14 +166,15 @@ export async function analyzeTransition(
 ): Promise<DeepSeekTransitionParams> {
   logger.info('Analyzing scene transition', { fromScene, toScene, transitionType });
 
-  const userPrompt = `Analyze this scene transition and generate transition music parameters:
+  const userPrompt = `Create transition music parameters:
 
 From Scene: ${fromScene}
 To Scene: ${toScene}
 Transition Type: ${transitionType}
 Duration: ${durationSeconds} seconds
 
-Output only valid JSON, no markdown code blocks.`;
+Create energy_levels array with timestamps that sum to ${durationSeconds} seconds.
+Output only valid JSON, no markdown.`;
 
   const client = getClient();
 
@@ -132,7 +185,7 @@ Output only valid JSON, no markdown code blocks.`;
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.7,
-    max_tokens: 400,
+    max_tokens: 600,
   });
 
   const content = response.choices[0]?.message?.content;
@@ -147,7 +200,23 @@ Output only valid JSON, no markdown code blocks.`;
 
   try {
     const params = JSON.parse(jsonStr) as DeepSeekTransitionParams;
-    logger.info('Transition analysis complete', { style: params.transition_style });
+
+    // Validate parameters
+    params.moods = params.moods.filter(m =>
+      SOUNDRAW_MOODS.includes(m as typeof SOUNDRAW_MOODS[number])
+    );
+    params.genres = params.genres.filter(g =>
+      SOUNDRAW_GENRES.includes(g as typeof SOUNDRAW_GENRES[number])
+    );
+    params.themes = params.themes.filter(t =>
+      SOUNDRAW_THEMES.includes(t as typeof SOUNDRAW_THEMES[number])
+    );
+
+    if (params.moods.length === 0) params.moods = ['Suspense'];
+    if (params.genres.length === 0) params.genres = ['Orchestra'];
+    if (params.themes.length === 0) params.themes = ['Cinematic'];
+
+    logger.info('Transition analysis complete', { moods: params.moods });
     return params;
   } catch (error) {
     logger.error('Failed to parse DeepSeek transition response', { content, error });

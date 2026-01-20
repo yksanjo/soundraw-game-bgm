@@ -1,4 +1,4 @@
-import { generateVariation } from '../services/soundraw.js';
+import { createSimilarMusic, customizeMusic, extractResult } from '../services/soundraw.js';
 import { GetVariationsInputSchema } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import type { VariationOutput } from '../types/index.js';
@@ -6,52 +6,75 @@ import type { VariationOutput } from '../types/index.js';
 export const getVariationsToolDefinition = {
   name: 'get_bgm_variations',
   description:
-    'Generate variations of an existing BGM for different intensities, instruments, or tempos. Useful for adaptive game audio where music needs to change based on gameplay state.',
+    'Generate a variation of an existing BGM using Soundraw. Use "similar" to create a new song with similar style, or "customize" to adjust energy levels or mute stems of the original.',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      base_audio_id: {
+      share_link: {
         type: 'string',
-        description: 'The audio ID of the original BGM to create variations from',
+        description: 'The share_link URL from a previous generate_bgm result (e.g., https://soundraw.io/edit_music?m=...)',
       },
       variation_type: {
         type: 'string',
-        enum: ['intensity', 'instrument', 'tempo'],
+        enum: ['similar', 'customize'],
         description:
-          'Type of variation: "intensity" (louder/quieter), "instrument" (different instruments), "tempo" (faster/slower)',
+          '"similar" creates a new song with similar style. "customize" adjusts energy/stems of existing song.',
       },
-      count: {
+      length: {
         type: 'number',
-        description: 'Number of variations to generate (1-5)',
+        description: 'Length for similar track in seconds (10-300). Only used with "similar" type.',
+      },
+      energy_preset: {
+        type: 'string',
+        enum: ['building', 'steady', 'climax', 'fade_out'],
+        description: 'Energy preset for customize. Only used with "customize" type.',
+      },
+      mute_stems: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: ['bc', 'bs', 'dr', 'me', 'fe', 'ff'],
+        },
+        description: 'Stems to mute: bc (backing), bs (bass), dr (drums), me (melody), fe (fill end), ff (fill start)',
       },
     },
-    required: ['base_audio_id', 'variation_type', 'count'],
+    required: ['share_link', 'variation_type'],
   },
 };
 
-const VARIATION_DESCRIPTIONS: Record<string, string[]> = {
-  intensity: [
-    'Subtle ambient version - reduced intensity',
-    'Medium build - moderate intensity',
-    'Full intensity version',
-    'Peak intensity - maximum energy',
-    'Climactic version - intense with dramatic peaks',
-  ],
-  instrument: [
-    'Stripped down - minimal instrumentation',
-    'Acoustic focus - organic instruments emphasized',
-    'Electronic focus - synths and digital sounds',
-    'Full orchestral - rich instrumental arrangement',
-    'Hybrid version - acoustic and electronic blend',
-  ],
-  tempo: [
-    'Slow version - relaxed pace',
-    'Slightly slower - gentle tempo reduction',
-    'Original tempo maintained',
-    'Slightly faster - increased energy',
-    'Fast version - high energy pace',
-  ],
-};
+// Energy presets for customize
+function getEnergyPreset(
+  preset: string,
+  durationSeconds: number = 60
+): Array<{ start: number; end: number; energy: string }> {
+  const quarter = durationSeconds / 4;
+
+  switch (preset) {
+    case 'building':
+      return [
+        { start: 0, end: quarter, energy: 'Low' },
+        { start: quarter, end: quarter * 2, energy: 'Medium' },
+        { start: quarter * 2, end: quarter * 3, energy: 'High' },
+        { start: quarter * 3, end: durationSeconds, energy: 'Very High' },
+      ];
+    case 'climax':
+      return [
+        { start: 0, end: durationSeconds, energy: 'Very High' },
+      ];
+    case 'fade_out':
+      return [
+        { start: 0, end: quarter, energy: 'High' },
+        { start: quarter, end: quarter * 2, energy: 'Medium' },
+        { start: quarter * 2, end: quarter * 3, energy: 'Low' },
+        { start: quarter * 3, end: durationSeconds, energy: 'Muted' },
+      ];
+    case 'steady':
+    default:
+      return [
+        { start: 0, end: durationSeconds, energy: 'Medium' },
+      ];
+  }
+}
 
 export async function handleGetVariations(
   args: Record<string, unknown>
@@ -60,31 +83,59 @@ export async function handleGetVariations(
 
   const input = GetVariationsInputSchema.parse(args);
 
-  const variations: VariationOutput['variations'] = [];
-  const descriptions = VARIATION_DESCRIPTIONS[input.variation_type] || [];
+  let result;
+  let format = 'm4a';
 
-  for (let i = 0; i < input.count; i++) {
-    logger.info(`Generating variation ${i + 1}/${input.count}`);
-
-    const result = await generateVariation(
-      input.base_audio_id,
-      input.variation_type,
-      i
-    );
-
-    variations.push({
-      audio_url: result.audio_url,
-      audio_id: result.id,
-      variation_type: input.variation_type,
-      description: descriptions[i] || `${input.variation_type} variation ${i + 1}`,
+  if (input.variation_type === 'similar') {
+    // Create a similar song
+    logger.info('Creating similar music');
+    const response = await createSimilarMusic({
+      share_link: input.share_link,
+      length: input.length,
+      mute_stems: input.mute_stems,
+      file_format: ['m4a'],
     });
+    result = response.result;
+    format = response.format;
+  } else {
+    // Customize existing song
+    logger.info('Customizing music');
+
+    const customizeParams: {
+      share_link: string;
+      energy_levels?: Array<{ start: number; end: number; energy: string }>;
+      mute_stems?: string[];
+      file_format?: string[];
+    } = {
+      share_link: input.share_link,
+      file_format: ['m4a'],
+    };
+
+    if (input.energy_preset) {
+      customizeParams.energy_levels = getEnergyPreset(input.energy_preset);
+    }
+
+    if (input.mute_stems && input.mute_stems.length > 0) {
+      customizeParams.mute_stems = input.mute_stems;
+    }
+
+    const response = await customizeMusic(customizeParams);
+    result = response.result;
+    format = response.format;
   }
 
+  const extracted = extractResult(result, format);
+
   const output: VariationOutput = {
-    variations,
-    base_audio_id: input.base_audio_id,
+    share_link: extracted.share_link,
+    audio_url: extracted.audio_url,
+    request_id: extracted.request_id,
+    duration_seconds: extracted.duration_seconds,
+    bpm: extracted.bpm,
+    variation_type: input.variation_type,
+    base_share_link: input.share_link,
   };
 
-  logger.info('Variations generation complete', { count: variations.length });
+  logger.info('Variation generation complete', { share_link: output.share_link });
   return output;
 }

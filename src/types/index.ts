@@ -1,5 +1,34 @@
 import { z } from 'zod';
 
+// ========== Soundraw API Constants ==========
+
+export const SOUNDRAW_MOODS = [
+  'Angry', 'Busy & Frantic', 'Dark', 'Dreamy', 'Elegant', 'Epic', 'Euphoric',
+  'Fear', 'Funny & Weird', 'Glamorous', 'Happy', 'Heavy & Ponderous', 'Hopeful',
+  'Laid Back', 'Mysterious', 'Peaceful', 'Restless', 'Romantic', 'Running',
+  'Sad', 'Scary', 'Sentimental', 'Sexy', 'Smooth', 'Suspense'
+] as const;
+
+export const SOUNDRAW_GENRES = [
+  'Acoustic', 'Hip Hop', 'Beats', 'Funk', 'Pop', 'Drum n Bass', 'Trap',
+  'Tokyo night pop', 'Rock', 'Latin', 'House', 'Tropical House', 'Ambient',
+  'Orchestra', 'Electro & Dance', 'Electronica', 'Techno & Trance',
+  'Jersey Club', 'Drill', 'R&B', 'Lofi Hip Hop', 'World', 'Afrobeats', 'Christmas'
+] as const;
+
+export const SOUNDRAW_THEMES = [
+  'Ads & Trailers', 'Broadcasting', 'Cinematic', 'Corporate', 'Comedy',
+  'Cooking', 'Documentary', 'Drama', 'Fashion & Beauty', 'Gaming',
+  'Holiday Season', 'Horror & Thriller', 'Motivational & Inspiring', 'Nature',
+  'Photography', 'Sports & Action', 'Technology', 'Travel', 'Tutorials',
+  'Vlogs', 'Wedding & Romance', 'Workout & Wellness'
+] as const;
+
+export const SOUNDRAW_TEMPOS = ['low', 'normal', 'high'] as const;
+export const SOUNDRAW_ENERGY_LEVELS = ['Muted', 'Low', 'Medium', 'High', 'Very High'] as const;
+export const SOUNDRAW_STEMS = ['bc', 'bs', 'dr', 'me', 'fe', 'ff'] as const;
+export const SOUNDRAW_FILE_FORMATS = ['m4a', 'mp3', 'wav'] as const;
+
 // ========== Input Schemas ==========
 
 export const GenerateBgmInputSchema = z.object({
@@ -9,111 +38,147 @@ export const GenerateBgmInputSchema = z.object({
   mood: z.string().optional().describe('Optional mood: epic, melancholic, mysterious, peaceful, tense, etc.'),
   duration_seconds: z.number().min(10).max(300).optional().describe('Target duration in seconds (10-300)'),
   engine: z.enum(['unreal', 'unity', 'godot']).optional().describe('Game engine for integration code'),
+  file_format: z.enum(['m4a', 'mp3', 'wav']).optional().describe('Audio file format (default: m4a)'),
 });
 
 export const GetVariationsInputSchema = z.object({
-  base_audio_id: z.string().describe('Reference ID of the original BGM'),
-  variation_type: z.enum(['intensity', 'instrument', 'tempo']).describe('Type of variation to generate'),
-  count: z.number().min(1).max(5).describe('Number of variations to generate (1-5)'),
+  share_link: z.string().url().describe('The share_link URL of the original BGM'),
+  variation_type: z.enum(['similar', 'customize']).describe('Type: similar (new song) or customize (adjust energy/stems)'),
+  length: z.number().min(10).max(300).optional().describe('Length for similar track'),
+  energy_preset: z.enum(['building', 'steady', 'climax', 'fade_out']).optional().describe('Energy preset for customize'),
+  mute_stems: z.array(z.enum(['bc', 'bs', 'dr', 'me', 'fe', 'ff'])).optional().describe('Stems to mute'),
 });
 
 export const AdaptiveLayerInputSchema = z.object({
-  audio_id: z.string().describe('Audio ID for stem separation'),
-  layers: z.array(z.string()).describe('Layers to extract: drums, bass, melody, ambient, etc.'),
-  crossfade_ms: z.number().min(0).max(5000).default(500).describe('Crossfade duration in milliseconds'),
+  share_link: z.string().url().describe('The share_link URL of the track'),
+  layers_to_keep: z.array(z.enum(['backing', 'bass', 'drums', 'melody'])).describe('Layers to keep unmuted'),
+  file_format: z.enum(['m4a', 'mp3', 'wav']).optional().describe('Audio format'),
 });
 
 export const SceneTransitionInputSchema = z.object({
   from_scene: z.string().describe('Starting scene description'),
   to_scene: z.string().describe('Target scene description'),
   transition_type: z.enum(['fade', 'stinger', 'crossfade']).describe('Type of musical transition'),
-  duration_seconds: z.number().min(1).max(30).describe('Transition duration in seconds'),
+  duration_seconds: z.number().min(10).max(60).describe('Transition duration in seconds (10-60)'),
 });
 
 // ========== Output Types ==========
 
 export interface GenerateBgmOutput {
+  share_link: string;
   audio_url: string;
-  audio_id: string;
+  request_id: string;
   duration_seconds: number;
   bpm: number;
-  key: string;
-  instruments: string[];
-  mood_tags: string[];
+  timestamps: Array<{ start: number; end: number; energy: string }>;
+  file_format: string;
   integration_code?: string;
   deepseek_reasoning: string;
+  soundraw_params: SoundrawComposeRequest;
 }
 
 export interface VariationOutput {
-  variations: Array<{
-    audio_url: string;
-    audio_id: string;
-    variation_type: string;
-    description: string;
-  }>;
-  base_audio_id: string;
+  share_link: string;
+  audio_url: string;
+  request_id: string;
+  duration_seconds: number;
+  bpm: number;
+  variation_type: string;
+  base_share_link: string;
 }
 
 export interface AdaptiveLayerOutput {
-  audio_id: string;
   layers: Array<{
     name: string;
+    mute_stems: string[];
+    share_link: string;
     audio_url: string;
-    volume_default: number;
+    request_id: string;
   }>;
-  crossfade_ms: number;
-  integration_code?: string;
+  base_share_link: string;
+  integration_code: string;
 }
 
 export interface SceneTransitionOutput {
-  transition_audio_url: string;
-  audio_id: string;
+  share_link: string;
+  audio_url: string;
+  request_id: string;
   from_scene: string;
   to_scene: string;
   transition_type: string;
   duration_seconds: number;
+  bpm: number;
   deepseek_reasoning: string;
 }
 
 // ========== DeepSeek Response Types ==========
 
 export interface DeepSeekMusicParams {
-  tempo: number;
-  mood: string;
-  instruments: string[];
-  energy: 'low' | 'medium' | 'high';
-  key_suggestion: string;
-  genre_tags: string[];
+  moods: string[];
+  genres: string[];
+  themes: string[];
+  tempo: 'low' | 'normal' | 'high';
+  energy_profile: 'building' | 'steady' | 'climax' | 'ambient';
   reasoning: string;
 }
 
 export interface DeepSeekTransitionParams {
   from_mood: string;
   to_mood: string;
-  transition_style: string;
-  tempo_change: 'increase' | 'decrease' | 'stable';
-  key_relationship: string;
+  moods: string[];
+  genres: string[];
+  themes: string[];
+  tempo: 'low' | 'normal' | 'high';
+  energy_levels: Array<{ start: number; end: number; energy: string }>;
   reasoning: string;
 }
 
-// ========== Soundraw Types ==========
+// ========== Soundraw API Types ==========
 
-export interface SoundrawGenerateRequest {
-  tempo: number;
-  mood: string;
-  instruments: string[];
-  energy: string;
-  duration: number;
-  genre?: string;
+export interface SoundrawComposeRequest {
+  length: number;
+  moods?: string[];
+  genres?: string[];
+  themes?: string[];
+  tempo?: string[];
+  file_format?: string[];
+  mute_stems?: string[];
+  energy_levels?: Array<{ start: number; end: number; energy: string }>;
 }
 
-export interface SoundrawGenerateResponse {
-  id: string;
-  audio_url: string;
-  duration: number;
-  bpm: number;
-  key: string;
-  tags: string[];
+export interface SoundrawSimilarRequest {
+  share_link: string;
+  length?: number;
+  tempo?: string[];
+  file_format?: string[];
+  mute_stems?: string[];
+}
+
+export interface SoundrawCustomizeRequest {
+  share_link: string;
+  energy_levels?: Array<{ start: number; end: number; energy: string }>;
+  mute_stems?: string[];
+  file_format?: string[];
+}
+
+export interface SoundrawComposeResponse {
+  request_id: string;
+}
+
+export interface SoundrawResultResponse {
+  endpoint: string;
+  params: Record<string, unknown>;
+  request_id: string;
+  status: 'processing' | 'done' | 'failed';
+  result?: {
+    bpm: string;
+    share_link: string;
+    length: number;
+    timestamps: Array<{ start: number; end: number; energy: string }>;
+    m4a_url?: string;
+    mp3_url?: string;
+    wav_url?: string;
+  };
 }
 
 // ========== Type exports ==========

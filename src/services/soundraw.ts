@@ -1,11 +1,15 @@
 import { logger } from '../utils/logger.js';
 import type {
-  SoundrawGenerateRequest,
-  SoundrawGenerateResponse,
-  DeepSeekMusicParams,
+  SoundrawComposeRequest,
+  SoundrawSimilarRequest,
+  SoundrawCustomizeRequest,
+  SoundrawComposeResponse,
+  SoundrawResultResponse,
 } from '../types/index.js';
 
-const SOUNDRAW_API_BASE_URL = process.env.SOUNDRAW_API_BASE_URL || 'https://api.soundraw.io/v1';
+const SOUNDRAW_API_BASE_URL = 'https://soundraw.io/api/v3';
+const POLL_INTERVAL_MS = 2000; // Poll every 2 seconds
+const MAX_POLL_ATTEMPTS = 150; // Max 5 minutes (150 * 2s)
 
 function getApiKey(): string {
   const apiKey = process.env.SOUNDRAW_API_KEY;
@@ -15,145 +19,236 @@ function getApiKey(): string {
   return apiKey;
 }
 
-// Map DeepSeek parameters to Soundraw API format
-function mapParamsToSoundraw(
-  params: DeepSeekMusicParams,
-  durationSeconds: number
-): SoundrawGenerateRequest {
+function getHeaders(): Record<string, string> {
   return {
-    tempo: params.tempo,
-    mood: params.mood,
-    instruments: params.instruments,
-    energy: params.energy,
-    duration: durationSeconds,
-    genre: params.genre_tags[0], // Use primary genre tag
+    'Authorization': `Bearer ${getApiKey()}`,
+    'Content-Type': 'application/json',
   };
 }
 
-export async function generateMusic(
-  params: DeepSeekMusicParams,
-  durationSeconds: number = 60
-): Promise<SoundrawGenerateResponse> {
-  logger.info('Generating music via Soundraw', { tempo: params.tempo, mood: params.mood, duration: durationSeconds });
-
-  const apiKey = getApiKey();
-  const requestBody = mapParamsToSoundraw(params, durationSeconds);
-
-  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/generate`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error('Soundraw API error', { status: response.status, error: errorText });
-    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
-  }
-
-  const result = await response.json() as SoundrawGenerateResponse;
-  logger.info('Music generated successfully', { audioId: result.id, duration: result.duration });
-  return result;
+// Sleep helper
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function generateVariation(
-  baseAudioId: string,
-  variationType: 'intensity' | 'instrument' | 'tempo',
-  index: number
-): Promise<SoundrawGenerateResponse> {
-  logger.info('Generating variation', { baseAudioId, variationType, index });
+// Poll for result until done or failed
+async function pollForResult(requestId: string): Promise<SoundrawResultResponse> {
+  logger.info('Polling for result', { requestId });
 
-  const apiKey = getApiKey();
+  for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+    const response = await fetch(`${SOUNDRAW_API_BASE_URL}/results/${requestId}`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
 
-  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/variations`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      base_audio_id: baseAudioId,
-      variation_type: variationType,
-      variation_index: index,
-    }),
-  });
+    if (!response.ok) {
+      const errorText = await response.text();
+      logger.error('Soundraw results API error', { status: response.status, error: errorText });
+      throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+    }
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error('Soundraw variation API error', { status: response.status, error: errorText });
-    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+    const result = await response.json() as SoundrawResultResponse;
+    logger.debug('Poll result', { status: result.status, attempt });
+
+    if (result.status === 'done') {
+      logger.info('Music generation complete', { requestId });
+      return result;
+    }
+
+    if (result.status === 'failed') {
+      logger.error('Music generation failed', { requestId });
+      throw new Error(`Soundraw generation failed for request: ${requestId}`);
+    }
+
+    // Still processing, wait and try again
+    await sleep(POLL_INTERVAL_MS);
   }
 
-  const result = await response.json() as SoundrawGenerateResponse;
-  logger.info('Variation generated', { audioId: result.id });
-  return result;
+  throw new Error(`Timeout waiting for Soundraw result: ${requestId}`);
 }
 
-export async function getStemSeparation(
-  audioId: string,
-  layers: string[]
-): Promise<Array<{ name: string; audio_url: string }>> {
-  logger.info('Requesting stem separation', { audioId, layers });
+// Get audio URL from result based on format
+function getAudioUrl(result: SoundrawResultResponse['result'], format: string): string {
+  if (!result) throw new Error('No result available');
 
-  const apiKey = getApiKey();
-
-  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/stems`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      audio_id: audioId,
-      layers: layers,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error('Soundraw stems API error', { status: response.status, error: errorText });
-    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+  switch (format) {
+    case 'wav':
+      if (result.wav_url) return result.wav_url;
+      break;
+    case 'mp3':
+      if (result.mp3_url) return result.mp3_url;
+      break;
+    case 'm4a':
+    default:
+      if (result.m4a_url) return result.m4a_url;
+      break;
   }
 
-  const result = await response.json() as { stems: Array<{ name: string; audio_url: string }> };
-  logger.info('Stems separated', { count: result.stems.length });
-  return result.stems;
+  // Fallback to any available format
+  return result.m4a_url || result.mp3_url || result.wav_url || '';
 }
 
-export async function generateTransitionMusic(
-  fromMood: string,
-  toMood: string,
-  transitionStyle: string,
-  durationSeconds: number
-): Promise<SoundrawGenerateResponse> {
-  logger.info('Generating transition music', { fromMood, toMood, transitionStyle, duration: durationSeconds });
+// POST /musics/compose - Create new music
+export async function composeMusic(
+  params: SoundrawComposeRequest
+): Promise<{ result: SoundrawResultResponse; format: string }> {
+  logger.info('Composing music via Soundraw', { length: params.length, moods: params.moods });
 
-  const apiKey = getApiKey();
-
-  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/transition`, {
+  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/musics/compose`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from_mood: fromMood,
-      to_mood: toMood,
-      transition_style: transitionStyle,
-      duration: durationSeconds,
-    }),
+    headers: getHeaders(),
+    body: JSON.stringify(params),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    logger.error('Soundraw transition API error', { status: response.status, error: errorText });
+    logger.error('Soundraw compose API error', { status: response.status, error: errorText });
     throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
   }
 
-  const result = await response.json() as SoundrawGenerateResponse;
-  logger.info('Transition music generated', { audioId: result.id });
-  return result;
+  const { request_id } = await response.json() as SoundrawComposeResponse;
+  logger.info('Compose request submitted', { request_id });
+
+  // Poll for result
+  const result = await pollForResult(request_id);
+  const format = params.file_format?.[0] || 'm4a';
+
+  return { result, format };
+}
+
+// POST /musics/similar - Create similar music
+export async function createSimilarMusic(
+  params: SoundrawSimilarRequest
+): Promise<{ result: SoundrawResultResponse; format: string }> {
+  logger.info('Creating similar music via Soundraw', { share_link: params.share_link });
+
+  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/musics/similar`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    logger.error('Soundraw similar API error', { status: response.status, error: errorText });
+    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+  }
+
+  const { request_id } = await response.json() as SoundrawComposeResponse;
+  logger.info('Similar request submitted', { request_id });
+
+  const result = await pollForResult(request_id);
+  const format = params.file_format?.[0] || 'm4a';
+
+  return { result, format };
+}
+
+// POST /musics/customize - Customize existing music
+export async function customizeMusic(
+  params: SoundrawCustomizeRequest
+): Promise<{ result: SoundrawResultResponse; format: string }> {
+  logger.info('Customizing music via Soundraw', { share_link: params.share_link });
+
+  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/musics/customize`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    logger.error('Soundraw customize API error', { status: response.status, error: errorText });
+    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+  }
+
+  const { request_id } = await response.json() as SoundrawComposeResponse;
+  logger.info('Customize request submitted', { request_id });
+
+  const result = await pollForResult(request_id);
+  const format = params.file_format?.[0] || 'm4a';
+
+  return { result, format };
+}
+
+// Helper to extract structured result
+export function extractResult(
+  soundrawResult: SoundrawResultResponse,
+  format: string
+): {
+  share_link: string;
+  audio_url: string;
+  request_id: string;
+  duration_seconds: number;
+  bpm: number;
+  timestamps: Array<{ start: number; end: number; energy: string }>;
+} {
+  if (!soundrawResult.result) {
+    throw new Error('No result in Soundraw response');
+  }
+
+  const { result } = soundrawResult;
+
+  return {
+    share_link: result.share_link,
+    audio_url: getAudioUrl(result, format),
+    request_id: soundrawResult.request_id,
+    duration_seconds: result.length,
+    bpm: parseInt(result.bpm, 10),
+    timestamps: result.timestamps,
+  };
+}
+
+// POST /musics/tags - Get available tags
+export async function getAvailableTags(
+  selected: Array<{ order: number; category: string; value: string }>
+): Promise<{
+  themes: string[];
+  moods: string[];
+  genres: string[];
+  tempos: string[];
+}> {
+  logger.info('Getting available tags', { selected });
+
+  const response = await fetch(`${SOUNDRAW_API_BASE_URL}/musics/tags`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ selected }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    logger.error('Soundraw tags API error', { status: response.status, error: errorText });
+    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+  }
+
+  return await response.json() as {
+    themes: string[];
+    moods: string[];
+    genres: string[];
+    tempos: string[];
+  };
+}
+
+// GET /accounts - Check usage
+export async function getAccountUsage(
+  month?: number,
+  year?: number
+): Promise<{ message: string }> {
+  const params = new URLSearchParams();
+  if (month) params.append('month', month.toString());
+  if (year) params.append('year', year.toString());
+
+  const url = `${SOUNDRAW_API_BASE_URL}/accounts${params.toString() ? '?' + params.toString() : ''}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: getHeaders(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Soundraw API error: ${response.status} - ${errorText}`);
+  }
+
+  return await response.json() as { message: string };
 }

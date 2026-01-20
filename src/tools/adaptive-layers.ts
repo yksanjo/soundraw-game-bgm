@@ -1,4 +1,4 @@
-import { getStemSeparation } from '../services/soundraw.js';
+import { customizeMusic, extractResult } from '../services/soundraw.js';
 import { AdaptiveLayerInputSchema } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import type { AdaptiveLayerOutput } from '../types/index.js';
@@ -6,102 +6,129 @@ import type { AdaptiveLayerOutput } from '../types/index.js';
 export const adaptiveLayerToolDefinition = {
   name: 'adaptive_layer_control',
   description:
-    'Get stem separation and layer control data for adaptive game audio. Separates music into individual layers (drums, bass, melody, ambient) that can be mixed in real-time based on gameplay.',
+    'Generate multiple versions of a track with different stems muted for adaptive game audio. Creates separate audio files for each layer configuration that can be mixed in real-time based on gameplay.',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      audio_id: {
+      share_link: {
         type: 'string',
-        description: 'The audio ID to separate into stems/layers',
+        description: 'The share_link URL from a previous generate_bgm result',
       },
-      layers: {
+      layers_to_keep: {
         type: 'array',
-        items: { type: 'string' },
-        description:
-          'Layers to extract (e.g., ["drums", "bass", "melody", "ambient", "vocals"])',
+        items: {
+          type: 'string',
+          enum: ['backing', 'bass', 'drums', 'melody'],
+        },
+        description: 'Which layers to generate isolated versions for. Each layer creates a version with other layers muted.',
       },
-      crossfade_ms: {
-        type: 'number',
-        description: 'Crossfade duration in milliseconds for layer transitions (default: 500)',
+      file_format: {
+        type: 'string',
+        enum: ['m4a', 'mp3', 'wav'],
+        description: 'Audio format (default: m4a)',
       },
     },
-    required: ['audio_id', 'layers'],
+    required: ['share_link', 'layers_to_keep'],
   },
 };
 
-// Default volume levels for different layers
-const DEFAULT_VOLUMES: Record<string, number> = {
-  drums: 0.8,
-  bass: 0.7,
-  melody: 0.9,
-  ambient: 0.5,
-  vocals: 1.0,
-  percussion: 0.6,
-  strings: 0.7,
-  brass: 0.8,
-  synth: 0.7,
-  piano: 0.8,
+// Map layer names to stem codes
+const LAYER_TO_STEMS: Record<string, string[]> = {
+  backing: ['bs', 'dr', 'me', 'fe', 'ff'], // Mute everything except backing (bc)
+  bass: ['bc', 'dr', 'me', 'fe', 'ff'],    // Mute everything except bass (bs)
+  drums: ['bc', 'bs', 'me', 'fe', 'ff'],   // Mute everything except drums (dr)
+  melody: ['bc', 'bs', 'dr', 'fe', 'ff'],  // Mute everything except melody (me)
 };
 
-function generateAdaptiveAudioCode(layers: string[], crossfadeMs: number): string {
-  return `// Adaptive Audio Implementation
-// Crossfade Duration: ${crossfadeMs}ms
+function generateAdaptiveAudioCode(layers: string[], baseShareLink: string): string {
+  return `// Adaptive Audio System - Layer Mixing
+// Base track: ${baseShareLink}
 
-class AdaptiveAudioMixer {
-  private layers: Map<string, { audio: HTMLAudioElement; volume: number }> = new Map();
-  private crossfadeDuration = ${crossfadeMs};
+class AdaptiveGameAudio {
+  private layers: Map<string, HTMLAudioElement> = new Map();
+  private masterVolume = 1.0;
+  private crossfadeDuration = 500; // ms
 
-  constructor(layerUrls: Record<string, string>) {
+  constructor() {
+    // Initialize layers from generated URLs
+    // Each layer is a version of the track with other stems muted
+  }
+
+  async loadLayers(layerUrls: Record<string, string>) {
     for (const [name, url] of Object.entries(layerUrls)) {
       const audio = new Audio(url);
       audio.loop = true;
-      this.layers.set(name, { audio, volume: 1.0 });
+      audio.volume = 0;
+      await audio.load();
+      this.layers.set(name, audio);
     }
   }
 
   // Start all layers synchronized
-  playAll(): void {
-    const startTime = performance.now() + 100; // Small delay for sync
-    for (const { audio } of this.layers.values()) {
+  play() {
+    const startTime = performance.now() + 50;
+    for (const audio of this.layers.values()) {
       audio.currentTime = 0;
       audio.play();
     }
   }
 
-  // Fade a layer in or out
-  setLayerVolume(layerName: string, targetVolume: number): void {
-    const layer = this.layers.get(layerName);
-    if (!layer) return;
+  // Crossfade layer volume
+  setLayerVolume(layer: string, targetVolume: number) {
+    const audio = this.layers.get(layer);
+    if (!audio) return;
 
-    const startVolume = layer.audio.volume;
+    const startVolume = audio.volume;
     const startTime = performance.now();
 
     const animate = () => {
-      const elapsed = performance.now() - startTime;
-      const progress = Math.min(elapsed / this.crossfadeDuration, 1);
-
-      layer.audio.volume = startVolume + (targetVolume - startVolume) * progress;
-
-      if (progress < 1) {
-        requestAnimationFrame(animate);
-      }
+      const progress = Math.min((performance.now() - startTime) / this.crossfadeDuration, 1);
+      audio.volume = startVolume + (targetVolume - startVolume) * progress * this.masterVolume;
+      if (progress < 1) requestAnimationFrame(animate);
     };
-
     requestAnimationFrame(animate);
   }
 
-  // Example: Combat intensity control
-  setCombatIntensity(intensity: number): void {
-    // intensity: 0 (exploration) to 1 (full combat)
-    this.setLayerVolume('drums', intensity * 0.8);
-    this.setLayerVolume('bass', 0.3 + intensity * 0.5);
-    this.setLayerVolume('melody', 0.7 + intensity * 0.3);
-    this.setLayerVolume('ambient', 1 - intensity * 0.5);
+  // Presets for common game states
+  setState(state: 'exploration' | 'combat' | 'stealth' | 'boss') {
+    switch (state) {
+      case 'exploration':
+        this.setLayerVolume('backing', 0.8);
+        this.setLayerVolume('melody', 0.6);
+        this.setLayerVolume('drums', 0.2);
+        this.setLayerVolume('bass', 0.4);
+        break;
+      case 'combat':
+        this.setLayerVolume('backing', 1.0);
+        this.setLayerVolume('melody', 0.8);
+        this.setLayerVolume('drums', 1.0);
+        this.setLayerVolume('bass', 0.9);
+        break;
+      case 'stealth':
+        this.setLayerVolume('backing', 0.5);
+        this.setLayerVolume('melody', 0.3);
+        this.setLayerVolume('drums', 0);
+        this.setLayerVolume('bass', 0.4);
+        break;
+      case 'boss':
+        this.setLayerVolume('backing', 1.0);
+        this.setLayerVolume('melody', 1.0);
+        this.setLayerVolume('drums', 1.0);
+        this.setLayerVolume('bass', 1.0);
+        break;
+    }
   }
 }
 
-// Layer URLs from Soundraw:
-${layers.map((l) => `// - ${l}: [URL from response]`).join('\n')}`;
+// Usage:
+// const audio = new AdaptiveGameAudio();
+// await audio.loadLayers({
+${layers.map(l => `//   '${l}': '<${l}_audio_url>',`).join('\n')}
+// });
+// audio.play();
+// audio.setState('exploration');
+// // Later: audio.setState('combat');
+`;
 }
 
 export async function handleAdaptiveLayers(
@@ -110,28 +137,48 @@ export async function handleAdaptiveLayers(
   logger.info('Handling adaptive_layer_control request', { args });
 
   const input = AdaptiveLayerInputSchema.parse(args);
-  const crossfadeMs = input.crossfade_ms ?? 500;
+  const fileFormat = input.file_format ?? 'm4a';
 
-  // Get stem separation from Soundraw
-  logger.info('Requesting stem separation', { audioId: input.audio_id, layers: input.layers });
-  const stems = await getStemSeparation(input.audio_id, input.layers);
+  const layers: AdaptiveLayerOutput['layers'] = [];
 
-  // Build output with default volumes
-  const outputLayers = stems.map((stem) => ({
-    name: stem.name,
-    audio_url: stem.audio_url,
-    volume_default: DEFAULT_VOLUMES[stem.name.toLowerCase()] ?? 0.7,
-  }));
+  // Generate a version for each requested layer
+  for (const layerName of input.layers_to_keep) {
+    logger.info(`Generating ${layerName} layer`);
 
-  const integrationCode = generateAdaptiveAudioCode(input.layers, crossfadeMs);
+    const muteStems = LAYER_TO_STEMS[layerName];
+    if (!muteStems) {
+      logger.warn(`Unknown layer: ${layerName}, skipping`);
+      continue;
+    }
+
+    const { result, format } = await customizeMusic({
+      share_link: input.share_link,
+      mute_stems: muteStems,
+      file_format: [fileFormat],
+    });
+
+    const extracted = extractResult(result, format);
+
+    layers.push({
+      name: layerName,
+      mute_stems: muteStems,
+      share_link: extracted.share_link,
+      audio_url: extracted.audio_url,
+      request_id: extracted.request_id,
+    });
+  }
+
+  const integrationCode = generateAdaptiveAudioCode(
+    input.layers_to_keep,
+    input.share_link
+  );
 
   const output: AdaptiveLayerOutput = {
-    audio_id: input.audio_id,
-    layers: outputLayers,
-    crossfade_ms: crossfadeMs,
+    layers,
+    base_share_link: input.share_link,
     integration_code: integrationCode,
   };
 
-  logger.info('Adaptive layers extraction complete', { layerCount: outputLayers.length });
+  logger.info('Adaptive layers generation complete', { layerCount: layers.length });
   return output;
 }
